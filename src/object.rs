@@ -495,8 +495,27 @@ impl<V> GenericNiftiObject<V> {
             ExtensionSequence::from_reader(extender, source, len)?
         };
 
+        // the samples start at `vox_offset`: skip what the extensions did not cover
+        skip_bytes(&mut source, len.saturating_sub(ext.bytes_on_disk()))?;
+
         // fetch volume (rest of file)
         Ok((V::from_reader(source, header, options)?, ext))
+    }
+
+    /// Read the extensions a header file carries after its extender, which run to its end.
+    fn header_extensions<R>(
+        hdr_stream: R,
+        header: &NiftiHeader,
+        extender: Extender,
+    ) -> Result<ExtensionSequence>
+    where
+        R: Read,
+    {
+        let mut rest = Vec::new();
+        let _ = hdr_stream.take(u64::MAX).read_to_end(&mut rest)?;
+        let len = rest.len();
+        let source = ByteOrdered::runtime(io::Cursor::new(rest), header.endianness);
+        ExtensionSequence::from_reader(extender, source, len)
     }
 
     fn from_file_impl<P, R>(
@@ -517,18 +536,20 @@ impl<V> GenericNiftiObject<V> {
             // extender is optional
             let extender = Extender::from_reader_optional(&mut stream)?.unwrap_or_default();
 
+            let extensions = Self::header_extensions(stream, &header, extender)?;
+
             // look for corresponding img file
             let img_path = path.as_ref().to_path_buf();
             let mut img_path_gz = into_img_file_gz(img_path);
 
-            Self::from_file_with_extensions(&img_path_gz, &header, extender, options.clone())
+            let volume = Self::from_volume_file(&img_path_gz, &header, options.clone())
                 .or_else(|e| {
                     match e {
                         NiftiError::Io(ref io_e) if io_e.kind() == io::ErrorKind::NotFound => {
                             // try .img file instead (remove .gz extension)
                             let has_ext = img_path_gz.set_extension("");
                             debug_assert!(has_ext);
-                            Self::from_file_with_extensions(img_path_gz, &header, extender, options)
+                            Self::from_volume_file(img_path_gz, &header, options)
                         }
                         e => Err(e),
                     }
@@ -539,7 +560,8 @@ impl<V> GenericNiftiObject<V> {
                     } else {
                         e
                     }
-                })?
+                })?;
+            (volume, extensions)
         } else {
             // extensions and volume are in the same source
 
@@ -565,9 +587,9 @@ impl<V> GenericNiftiObject<V> {
         V: FromSource<MaybeGzDecodedFile>,
     {
         let header = NiftiHeader::from_reader(&mut hdr_stream)?;
-        let extender = Extender::from_reader_optional(hdr_stream)?.unwrap_or_default();
-        let (volume, extensions) =
-            Self::from_file_with_extensions(vol_path, &header, extender, options)?;
+        let extender = Extender::from_reader_optional(&mut hdr_stream)?.unwrap_or_default();
+        let extensions = Self::header_extensions(hdr_stream, &header, extender)?;
+        let volume = Self::from_volume_file(vol_path, &header, options)?;
 
         Ok(GenericNiftiObject {
             header,
@@ -576,20 +598,29 @@ impl<V> GenericNiftiObject<V> {
         })
     }
 
-    /// Read a NIFTI volume, along with the extensions, from an image file. NIFTI-1 volume
-    /// files usually have the extension ".img" or ".img.gz". In the latter case, the file
-    /// is automatically decoded as a Gzip stream.
-    fn from_file_with_extensions<P>(
+    /// Read a NIFTI volume from an image file, whose samples start `vox_offset` bytes in.
+    /// NIFTI-1 volume files usually have the extension ".img" or ".img.gz". In the latter
+    /// case, the file is automatically decoded as a Gzip stream.
+    fn from_volume_file<P>(
         path: P,
         header: &NiftiHeader,
-        extender: Extender,
         options: <V as FromSourceOptions>::Options,
-    ) -> Result<(V, ExtensionSequence)>
+    ) -> Result<V>
     where
         P: AsRef<Path>,
         V: FromSource<MaybeGzDecodedFile>,
     {
-        let reader = open_file_maybe_gz(path)?;
-        Self::from_reader_with_extensions(reader, header, extender, options)
+        let mut reader = open_file_maybe_gz(path)?;
+        skip_bytes(&mut reader, header.vox_offset.max(0.0) as usize)?;
+        V::from_reader(reader, header, options)
     }
+}
+
+/// Skip `count` bytes of `source`, which must hold them.
+fn skip_bytes<R: Read>(source: &mut R, count: usize) -> Result<()> {
+    let skipped = io::copy(&mut source.by_ref().take(count as u64), &mut io::sink())? as usize;
+    if skipped != count {
+        return Err(NiftiError::IncompatibleLength(skipped, count));
+    }
+    Ok(())
 }
