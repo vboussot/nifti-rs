@@ -179,6 +179,51 @@ impl ExtensionSequence {
         })
     }
 
+    /// Read a sequence of extensions until the source ends, for a header file
+    /// whose extensions run to its last byte. The source ending on an extension
+    /// boundary closes the sequence; ending inside one is an error.
+    pub fn from_reader_to_end<S, E>(
+        extender: Extender,
+        mut source: ByteOrdered<S, E>,
+    ) -> Result<Self>
+    where
+        S: Read,
+        E: Endian,
+    {
+        let mut extensions = Vec::new();
+        if extender.has_extensions() {
+            loop {
+                let mut head = [0u8; 8];
+                let read = read_until_full_or_end(&mut source, &mut head)?;
+                if read == 0 {
+                    break;
+                }
+                if read < head.len() {
+                    return Err(NiftiError::IncompatibleLength(read, head.len()));
+                }
+                let endianness = source.endianness();
+                let esize = endianness.read_i32(&head[..4])?;
+                let ecode = endianness.read_i32(&head[4..])?;
+                let data_size = (esize as usize).saturating_sub(8);
+                let mut edata = Vec::new();
+                edata
+                    .try_reserve_exact(data_size)
+                    .map_err(|e| NiftiError::ReserveExtended(data_size, e))?;
+                let nb_bytes_written = (&mut source)
+                    .take(data_size as u64)
+                    .read_to_end(&mut edata)?;
+                if nb_bytes_written != data_size {
+                    return Err(NiftiError::IncompatibleLength(nb_bytes_written, data_size));
+                }
+                extensions.push(Extension::new(ecode, edata));
+            }
+        }
+        Ok(ExtensionSequence {
+            extender,
+            extensions,
+        })
+    }
+
     /// Obtain an iterator to the extensions.
     pub fn iter(&self) -> ::std::slice::Iter<'_, Extension> {
         self.extensions.iter()
@@ -205,4 +250,16 @@ impl ExtensionSequence {
     pub fn extender(&self) -> Extender {
         self.extender
     }
+}
+
+/// Fill `buf` from `source`, stopping early only at the end of the source.
+fn read_until_full_or_end<S: Read>(mut source: S, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match source.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
 }

@@ -83,3 +83,15 @@ fn a_pair_reads_the_header_extensions_and_the_image_at_vox_offset() {
     assert_eq!(obj.extensions().len(), 1);
     assert_ramp(obj.volume());
 }
+
+#[test]
+fn a_pair_header_cut_inside_an_extension_is_refused() {
+    let dir = std::env::temp_dir().join(format!("nifti-rs-cut-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hdr = std::fs::read("resources/vox_offset/pair.hdr").unwrap();
+    std::fs::write(dir.join("cut.hdr"), &hdr[..hdr.len() - 8]).unwrap();
+    std::fs::copy("resources/vox_offset/pair.img", dir.join("cut.img")).unwrap();
+    let result = ReaderOptions::new().read_file(dir.join("cut.hdr"));
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(result.is_err(), "an extension cut short is not a shorter extension");
+}

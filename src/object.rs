@@ -3,8 +3,8 @@
 use crate::error::NiftiError;
 use crate::error::Result;
 use crate::extension::{Extender, ExtensionSequence};
-use crate::header::NiftiHeader;
 use crate::header::MAGIC_CODE_NI1;
+use crate::header::NiftiHeader;
 use crate::util::{into_img_file_gz, is_gz_file, open_file_maybe_gz};
 use crate::volume::inmem::InMemNiftiVolume;
 use crate::volume::streamed::StreamedNiftiVolume;
@@ -511,11 +511,8 @@ impl<V> GenericNiftiObject<V> {
     where
         R: Read,
     {
-        let mut rest = Vec::new();
-        let _ = hdr_stream.take(u64::MAX).read_to_end(&mut rest)?;
-        let len = rest.len();
-        let source = ByteOrdered::runtime(io::Cursor::new(rest), header.endianness);
-        ExtensionSequence::from_reader(extender, source, len)
+        let source = ByteOrdered::runtime(hdr_stream, header.endianness);
+        ExtensionSequence::from_reader_to_end(extender, source)
     }
 
     fn from_file_impl<P, R>(
