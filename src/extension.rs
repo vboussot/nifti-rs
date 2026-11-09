@@ -152,24 +152,11 @@ impl ExtensionSequence {
         if extender.has_extensions() {
             let mut offset = 0;
             while offset < len {
-                let esize = source.read_i32()?;
-                let ecode = source.read_i32()?;
-
-                let data_size = (esize as usize).saturating_sub(8);
-                let mut edata = Vec::new();
-                edata
-                    .try_reserve_exact(data_size)
-                    .map_err(|e| NiftiError::ReserveExtended(data_size, e))?;
-                let nb_bytes_written = (&mut source)
-                    .take(data_size as u64)
-                    .read_to_end(&mut edata)?;
-
-                if nb_bytes_written != data_size {
-                    return Err(NiftiError::IncompatibleLength(nb_bytes_written, data_size));
-                }
-
-                extensions.push(Extension::new(ecode, edata));
-                offset += esize as usize;
+                let mut head = [0u8; 8];
+                source.read_exact(&mut head)?;
+                let (esize, extension) = read_extension(&mut source, head)?;
+                extensions.push(extension);
+                offset += esize;
             }
         }
 
@@ -201,21 +188,7 @@ impl ExtensionSequence {
                 if read < head.len() {
                     return Err(NiftiError::IncompatibleLength(read, head.len()));
                 }
-                let endianness = source.endianness();
-                let esize = endianness.read_i32(&head[..4])?;
-                let ecode = endianness.read_i32(&head[4..])?;
-                let data_size = (esize as usize).saturating_sub(8);
-                let mut edata = Vec::new();
-                edata
-                    .try_reserve_exact(data_size)
-                    .map_err(|e| NiftiError::ReserveExtended(data_size, e))?;
-                let nb_bytes_written = (&mut source)
-                    .take(data_size as u64)
-                    .read_to_end(&mut edata)?;
-                if nb_bytes_written != data_size {
-                    return Err(NiftiError::IncompatibleLength(nb_bytes_written, data_size));
-                }
-                extensions.push(Extension::new(ecode, edata));
+                extensions.push(read_extension(&mut source, head)?.1);
             }
         }
         Ok(ExtensionSequence {
@@ -250,6 +223,28 @@ impl ExtensionSequence {
     pub fn extender(&self) -> Extender {
         self.extender
     }
+}
+
+/// Read one extension after its 8-byte head (esize, ecode): the declared
+/// esize, which the caller advances by, and the extension.
+fn read_extension<S, E>(source: &mut ByteOrdered<S, E>, head: [u8; 8]) -> Result<(usize, Extension)>
+where
+    S: Read,
+    E: Endian,
+{
+    let endianness = source.endianness();
+    let esize = endianness.read_i32(&head[..4])?;
+    let ecode = endianness.read_i32(&head[4..])?;
+    let data_size = (esize as usize).saturating_sub(8);
+    let mut edata = Vec::new();
+    edata
+        .try_reserve_exact(data_size)
+        .map_err(|e| NiftiError::ReserveExtended(data_size, e))?;
+    let nb_bytes_written = source.take(data_size as u64).read_to_end(&mut edata)?;
+    if nb_bytes_written != data_size {
+        return Err(NiftiError::IncompatibleLength(nb_bytes_written, data_size));
+    }
+    Ok((esize as usize, Extension::new(ecode, edata)))
 }
 
 /// Fill `buf` from `source`, stopping early only at the end of the source.
